@@ -1,0 +1,869 @@
+---
+title: "Graph signal processing for Neuroimmune diseases"
+author: "Chenfei Ye"
+date: "2020/01/12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.table.format = "html") 
+options(digits = 3)
+```
+
+### Background
+
+This study mainly focused on exploring the coupling between brain activity and structural network affected by inflammatory and demyelinating neurological disorders, based on resting-state fMRI and diffusion MRI data.
+
+***
+#### Data Acquisition: 
+CIS (clinically isolated syndrome), MS (multiple sclerosis) patients along with normal controls recruited by Xuanwu Hospital of Capital Medical University were selected for this study. All the patients underwent physical and cognitive examination and were assessed by the expanded disability status scale (EDSS) and paced auditory serial addition test (PASAT). This study is approved by the Xuanwu Hospital Ethics Committee. Written informed consents were obtained from all participants. 
+
+***
+#### Data Processing: 
+
+- Each individual T1-weighted brain image volume was anatomically parcellated by FreeSurfer 6.0 and mapped to [Glasser360 atlas](http://doi.org/10.1038/nature18933). Note that all nodes defined in this atlas belong to [22 cortical areas](https://bitbucket.org/dpat/tools/raw/master/REF/ATLASES/HCP-MMP1_cortices.txt). To explore all brain areas, I further include subcortical regions from FSL (already integrated in [MRtrix_connectome pipeline](https://github.com/BIDS-Apps/MRtrix3_connectome)). 
+
+
+- dMRI images have been processed through [MRtrix_connectome pipeline](https://github.com/BIDS-Apps/MRtrix3_connectome). After anatomical-constrained tractography method, iFOD2 algorithm (Tournier et al., 2010) was applied to estimate 1 million probabilistic streamlines in the whole brain for each individual. I further generated the individual white matter connectivity matrix representing the brain structural network, where each edge weight was defined by the number of connections between the end-nodes corrected by [multiple alternative methods](https://mrtrix.readthedocs.io/en/latest/reference/commands/tck2connectome.html#tck2connectome).
+
+- rs-fMRI images have been process through [fmriprep](https://fmriprep.org/en/stable) and [XcpEngine](https://xcpengine.readthedocs.io). BOLD_4D (timeseries BOLD signal) were derived as the brain functional activity for each nodal region, respectively.
+
+#### GSP analysis
+- I further defined and calculated `the decoupling index` (i.e. the ratio between the liberal and the aligned component of graph spectrum) on ICN-level for both empirical and surrogate brain functional activity. The surrogate functional signal was defined by spectral randomization, incorporating knowledge about the structural network (see [ref](https://doi.org/10.1038/s41467-019-12765-7) for details). 
+
+***
+#### Aims of the current script
+- launch an exploratory statistical analysis to compare `the decoupling index` across the participant groups.
+- investigate the association between `the decoupling index` and the clinical phenotypes. 
+- investigate the FA abnormalities for each ICN across the participant groups.
+
+***
+#### load library
+```{r, message=FALSE, warning=FALSE}
+library(stringr)
+library(broom)
+library(dplyr)
+library(multcomp)
+library(ppcor)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(ggplot2)
+library(tidyr)
+library(ggrepel)
+library(ggpmisc)
+library(magrittr)
+library(data.table)
+library(effectsize)
+```
+
+#### load data
+```{r}
+main_path='D:\\Image_data\\XWMS\\GSP_csv\\'
+df_sub=read.csv(str_c(main_path,'\\participants.csv'),header = TRUE,row.names=1) 
+
+df_sub[,'edss'] <- as.numeric(df_sub[,'edss'])
+df_sub[,'dd'] <- as.numeric(df_sub[,'dd'])
+df_sub[,'pasat_3'] <- as.numeric(df_sub[,'pasat_3'])
+df_sub[,'pasat_2'] <- as.numeric(df_sub[,'pasat_2'])
+df_sub[,'head_t2_lesion_volume'] <- as.numeric(df_sub[,'head_t2_lesion_volume'])
+df_sub[,'spinal_t2_lesion_volume'] <- as.numeric(df_sub[,'spinal_t2_lesion_volume'])
+df_sub <- data.frame(names = row.names(df_sub), df_sub)
+
+region_type = '' 
+ICN_type = 'Yeo' 
+activity_type = 'BOLD' 
+Yeo_overlap = '0.6'
+FDR_correction = TRUE
+Tract_type = 'meanlength' 
+```
+
+
+load processed results and merge dataframes
+```{r}
+if (activity_type == 'BOLD') {
+    csv_path = str_c(main_path,'CIS_MS_NC\\BOLD_4D_',Tract_type,'_',Yeo_overlap)
+
+  df_network_BN = read.csv(
+    str_c(csv_path, '\\BOLD_', ICN_type , '-network_individual_df.csv'),
+    header = TRUE,
+    row.names = 1
+  )
+  df_parcel_BN = read.csv(
+    str_c(csv_path, '\\BOLD_', ICN_type , '-parcel_individual_df.csv'),
+    header = TRUE,
+    row.names = 1
+  )
+} 
+FA_path=str_c(main_path, 'CIS_MS_NC\\FA_region')
+
+LUT_path = read.csv(
+  str_c(
+    'D:\\cye_py_code\\connectome\\CAB-NP_v1.1_Labels-ReorderedbyNetworks_Yeo_', Yeo_overlap,'.csv'
+  )
+)
+df_norm=read.csv(
+  str_c(csv_path, '\\s_deCoupIdx_brain_individual_df.csv'),
+  header = TRUE,
+  row.names = 1,
+  col.names = c('idx', 'subname', 'deCoupIdxgroup_brain')
+)
+df_network=read.csv(
+  str_c(
+    csv_path,
+    '\\s_deCoupIdx_',
+    ICN_type,
+    '-network_individual_df.csv'
+  ),
+  header = TRUE,
+  row.names = 1
+)
+df_parcel=read.csv(
+  str_c(csv_path, '\\s_deCoupIdx_node_individual_df.csv'),
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE
+)
+df_network_FA=read.csv(
+  str_c(FA_path, '\\FA_', ICN_type, '-network.csv'),
+  header = TRUE,
+  row.names = 1
+)
+df_parcel_FA=read.csv(
+  str_c(FA_path, '\\FA_', ICN_type, '-parcel.csv'),
+  header = TRUE,
+  row.names = 1
+)
+
+
+```
+
+
+Merge dataframes
+```{r}
+df_norm = merge(df_sub, df_norm, by.x = 'names', by.y = 'subname')
+df_network = merge(df_sub, df_network, by.x = 'names', by.y = 'subname')
+df_parcel = merge(df_sub, df_parcel, by.x = 'names', by.y = 'subname')
+df_network_FA = merge(df_sub, df_network_FA, by.x = 'names', by.y = 'subname')
+df_parcel_FA = merge(df_sub, df_parcel_FA, by.x = 'names', by.y = 'subname')
+df_network_BN = merge(df_sub, df_network_BN, by.x = 'names', by.y = 'subname')
+df_parcel_BN = merge(df_sub, df_parcel_BN, by.x = 'names', by.y = 'subname')
+
+```
+
+
+define subgroup
+```{r}
+df_norm_NC=df_norm %>% filter(group %in% 'NC')
+df_norm_MS=df_norm %>% filter(group %in% 'MS')
+df_network_NC=df_network %>% filter(group %in% 'NC')
+df_network_MS=df_network %>% filter(group %in% 'MS')
+df_parcel_NC=df_parcel %>% filter(group %in% 'NC')
+df_parcel_MS=df_parcel %>% filter(group %in% 'MS')
+df_network_FA_NC=df_network_FA %>% filter(group %in% 'MS')
+df_network_FA_MS=df_network_FA %>% filter(group %in% 'MS')
+df_norm_CIS=df_norm %>% filter(group %in% 'CIS')
+df_network_CIS=df_network %>% filter(group %in% 'CIS')
+df_parcel_CIS=df_parcel %>% filter(group %in% 'CIS')
+df_network_FA_CIS=df_network_FA %>% filter(group %in% 'CIS')
+```
+
+specify groups for the following analysis
+```{r}
+df_parcel_prog = df_parcel 
+df_parcel_prog_P = df_parcel %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+
+df_network_prog = df_network 
+df_network_prog_P = df_network %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+
+df_network_FA_prog = df_network_FA 
+df_network_FA_prog_P = df_network_FA %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+
+
+df_parcel_FA_prog = df_parcel_FA 
+df_parcel_FA_prog_P = df_parcel_FA %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+
+df_network_BN_prog = df_network_BN 
+df_network_BN_prog_P = df_network_BN %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+
+df_parcel_BN_prog = df_parcel_BN 
+df_parcel_BN_prog_P = df_parcel_BN %>% filter(group %in% c('CIS', 'MS')) # progression Patient group: CIS, MS
+  
+}
+```
+
+Descriptive stats
+```{r, warning=FALSE}
+group_description = df_norm %>% group_by(group) %>% summarise(NumberofSub = n(),
+                                       avg_age = mean(age,na.rm=TRUE),
+                                       sd_age = sd(age,na.rm=TRUE),
+                                       median_dd = median(dd,na.rm=TRUE),
+                                       min_dd = min(dd,na.rm=TRUE),
+                                       max_dd = max(dd,na.rm=TRUE),
+                                       avg_PASAT3=mean(pasat_3,na.rm=TRUE),
+                                       sd_PASAT3=sd(pasat_3,na.rm=TRUE),
+                                       avg_PASAT2=mean(pasat_2,na.rm=TRUE),
+                                       sd_PASAT2=sd(pasat_2,na.rm=TRUE),
+                                       median_WMH = median(head_t2_lesion_volume,na.rm=TRUE),
+                                       min_WMH = min(head_t2_lesion_volume,na.rm=TRUE),
+                                       max_WMH = max(head_t2_lesion_volume,na.rm=TRUE))
+
+group_description %>% kable() %>% kable_styling("striped", full_width = F)
+# sex distribution
+table(df_norm$group,df_norm$sex) %>% kable() %>% kable_styling("hover")
+# ANOVA for age
+summary(aov(age ~ group, data = df_norm))
+# chisquare test for sex
+chisq.test(table(df_norm$sex,df_norm$group)) 
+```
+
+Define network colors
+```{r}
+if (ICN_type == 'Cole') {
+  netcolor = c(
+    'Visual1' = 'maroon',
+    'Visual2' = 'cyan',
+    'Somatomotor' = 'orangered',
+    'Cingulo.Opercular' = 'seagreen',
+    'Dorsal.Attention' = 'gold',
+    'Language' = 'deepskyblue',
+    'Frontoparietal' = 'greenyellow',
+    'Auditory' = 'purple',
+    'Posterior.Multimodal' = '#009E73',
+    'Default' = '#F0E442',
+    'Orbito.Affective' = '#0072B2',
+    'Ventral.Multimodal' = '#D55E00',
+    'Subcortical' = '#CC79A7'
+  )
+} else {
+  netcolor = c(
+    'Visual' = 'maroon',
+    'Somatomotor' = 'orangered',
+    'Dorsal.Attention' = 'gold',
+    'Ventral.Attention' = 'cyan',
+    'Limbic' = 'deepskyblue',
+    'Frontoparietal' = 'greenyellow',
+    'Default' = 'seagreen',
+    'Subcortical' = 'purple'
+  )
+}
+
+```
+
+Check node-level surrogate null model
+```{r}
+parcel_names <<- colnames(df_parcel %>% dplyr::select('Visual1-04_L-Ctx':'Brain-Stem'))
+df_node_rand=read.csv(str_c(csv_path,'\\s_deCoupIdx_node_rand_df.csv'), header = TRUE, row.names=1)
+df_node_empi=read.csv(str_c(csv_path,'\\s_deCoupIdx_node_empirical_df.csv'), header = TRUE, row.names=1)
+colnames(df_node_rand) = parcel_names
+colnames(df_node_empi) = parcel_names
+df_node_rand2=df_node_rand %>% gather(key = nodelabel,value = value)
+df_node_empi2=df_node_empi %>% gather(key = nodelabel,value = value)
+
+
+# df_network_rand_percent <- df_network_rand
+node_quantile_ls = list()
+for (i in colnames(df_node_empi)) {
+  percent_name = str_c(i,'_percent')
+  node_quantile_ls <- c(node_quantile_ls, ecdf(df_node_rand[,i])(df_node_empi[1,i]))
+}
+
+df_node_quantile = as.data.frame(node_quantile_ls)
+node_fail_surrogate <- parcel_names[df_node_quantile >= 0.05]
+```
+
+
+Check network-level surrogate null model
+```{r}
+df_network_rand=read.csv(str_c(csv_path,'\\s_deCoupIdx_',ICN_type, '-network_rand_df.csv'), header = TRUE, row.names=1)
+df_network_empi=read.csv(str_c(csv_path,'\\s_deCoupIdx_',ICN_type, '-network_empirical_df.csv'), header = TRUE, row.names=1)
+df_network_rand2=df_network_rand %>% gather(key = netlabel,value = value)
+df_network_empi2=df_network_empi %>% gather(key = netlabel,value = value)
+
+# plot network based on network assignment
+ggplot(df_network_rand2, aes(x=netlabel, y=value)) +
+  geom_boxplot(aes(fill=netlabel),outlier.shape = NA) +ylim(0, 3)+ theme_light()+ 
+  # geom_dotplot(binwidth = 0.1,binaxis='y', stackdir='centerwhole',position=position_dodge(0.01),dotsize=0.1) + 
+  geom_point(data = df_network_empi2, shape=16, size = 2,color='#787878') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.text.x = element_blank(),text = element_text( hjust = 1,size=15)) +
+  theme(axis.title.x=element_blank(),axis.title.y=element_blank(),legend.title=element_blank(),plot.margin = unit(c(1,1,1,1), "cm"))+ scale_fill_manual(values=netcolor)
+
+# df_network_rand_percent <- df_network_rand
+network_quantile_ls = list()
+for (i in colnames(df_network_empi)) {
+  percent_name = str_c(i,'_percent')
+  network_quantile_ls <- c(network_quantile_ls, ecdf(df_network_rand[,i])(df_network_empi[1,i]))
+}
+
+df_network_quantile = as.data.frame(network_quantile_ls, col.names = colnames(df_network_empi))
+ICN_fail_surrogate <- colnames(df_network_quantile)[df_network_quantile >= 0.05]
+```
+
+So these following ICN: ** `r ICN_fail_surrogate` ** would not be statistically analyzed because of not significant.
+
+
+Define parcel names (global variable)
+```{r}
+for (i in node_fail_surrogate) {
+  parcel_names <<- parcel_names[parcel_names != i]  
+}
+```
+
+
+Define network names (global variable)
+```{r}
+if (ICN_type == 'Cole') {
+    network_names <<- colnames(df_network %>% dplyr::select(Visual1:Subcortical))
+    for (i in ICN_fail_surrogate) {
+      network_names <<- network_names[network_names != i]  
+    }
+  } else {
+    network_names <<- colnames(df_network %>% dplyr::select(Visual:Subcortical))
+    for (i in ICN_fail_surrogate) {
+      network_names <<- network_names[network_names != i]  
+    }
+  }
+```
+
+
+
+***
+#### Group comparisons
+ANCOVA of `the decoupling index` on whole-brain level
+```{r, warning=FALSE}
+summary(aov(deCoupIdxgroup_brain ~ group +age + sex, data = df_norm))
+```
+
+Define common function
+table of the mean for group comparison 
+```{r}
+Stats_ICN_mean <- function(df, ICN_type) {
+  if (ICN_type == 'Cole') {
+    stats_network_raw = df %>% group_by(group) %>% summarise(
+    across(Visual1:Subcortical, mean))
+  } else {
+    stats_network_raw = df %>% group_by(group) %>% summarise(
+    across(Visual:Subcortical, mean))
+  }
+  
+  stats_network_raw$group = as.character(stats_network_raw$group)
+  stats_network_raw <- stats_network_raw %>% dplyr::select(one_of(c('group', network_names)))
+  return(stats_network_raw)
+}
+
+Stats_ICN_std <- function(df, ICN_type) {
+  if (ICN_type == 'Cole') {
+    stats_network_raw = df %>% group_by(group) %>% summarise(
+    across(Visual1:Subcortical, sd))
+  } else {
+    stats_network_raw = df %>% group_by(group) %>% summarise(
+    across(Visual:Subcortical, sd))
+  }
+  
+  stats_network_raw$group = as.character(stats_network_raw$group)
+  stats_network_raw <- stats_network_raw %>% dplyr::select(one_of(c('group', network_names)))
+  return(stats_network_raw)
+}
+
+
+
+Stats_parcel_mean <- function(df) {
+    stats_parcel_raw = df %>% group_by(group) %>% summarise(
+    across('Visual1-04_L-Ctx':'Brain-Stem', mean))
+
+  stats_parcel_raw$group = as.character(stats_parcel_raw$group)
+  stats_parcel_raw <- stats_parcel_raw %>% dplyr::select(one_of(c('group', parcel_names)))
+  return(stats_parcel_raw)
+}
+```
+
+Define common function
+table of statistics for group comparison
+```{r}
+Stats_table_p <-
+  function(df_network,
+           ROI_names,
+           stats_network_raw,
+           df_two,
+           df_dist,
+           df_prog) {
+    # Calculate significance for ancova (adjusted for age and sex)
+    network_two_p = list()
+    network_dist_p = list()
+    network_prog_p = list()
+    
+    for (i in ROI_names) {
+      stat_two = oneway.test(get(i) ~ group, data = df_two, var.equal=FALSE)
+      network_two_p <-
+        c(network_two_p, stat_two$p.value)
+      
+      stat_dist = aov(get(i) ~ group + age + sex, data = df_dist)
+      network_dist_p <-
+        c(network_dist_p, unlist(summary(stat_dist))["Pr(>F)1"])
+      
+      stat_prog = aov(get(i) ~ group + age + sex, data = df_prog)
+      network_prog_p <-
+        c(network_prog_p, unlist(summary(stat_prog))["Pr(>F)1"])
+      
+    }
+    
+    network_two_p = p.adjust(network_two_p, method = "bonferroni") # multiple test adjustment
+    network_two_p <- c('ANCOVA_two_sig' , network_two_p)
+    network_two_p = unname(network_two_p)
+    
+    network_dist_p = p.adjust(network_dist_p, method = "bonferroni") # multiple test adjustment
+    network_dist_p <- c('ANCOVA_dist_sig' , network_dist_p)
+    network_dist_p = unname(network_dist_p)
+    
+    network_prog_p = p.adjust(network_prog_p, method = "bonferroni") # multiple test adjustment
+    network_prog_p <- c('ANCOVA_prog_sig' , network_prog_p)
+    network_prog_p = unname(network_prog_p)
+    
+    stats_network_ancova = stats_network_raw
+    stats_network_ancova <-
+      rbind(
+        stats_network_ancova,
+        network_two_p,
+        network_dist_p,
+        network_prog_p,
+        stringsAsFactors = FALSE
+      )
+    
+    # Show ancova results for`the decoupling index` on network-level
+    stats_network_ancova = stats_network_ancova %>%
+      remove_rownames %>% column_to_rownames(var = "group")
+    # transpose
+    stats_network_ancova_t <- transpose(stats_network_ancova)
+    colnames(stats_network_ancova_t) <- rownames(stats_network_ancova)
+    rownames(stats_network_ancova_t) <- colnames(stats_network_ancova)
+    return(stats_network_ancova_t)
+  }
+```
+
+Define common function
+Violin plot for group comparison
+```{r}
+Violin_plot <-
+  function(df_network, ICN_type, network_sig_names) {
+    if (ICN_type == 'Cole') {
+      df_network_gather <-
+        tidyr::gather(df_network,ICN,value,contains(network_sig_names))
+    } else {
+      df_network_gather <-
+        tidyr::gather(df_network, ICN, value,contains(network_sig_names))
+    }
+    
+    return(df_network_gather)
+  }
+
+```
+
+Define common function
+table of ICN-level statistics for correlation
+```{r}
+Stats_partial_correlation_ICN <-
+  function(stats_network_mean, df_network_groupX, var, groupname) {
+    df_network_groupX[,'sex'] <- as.numeric(df_network_groupX[,'sex'])
+    network_r = list()
+    network_p = list()
+    for (i in network_sig_names) {
+      pcor_stats = pcor.test(
+        x = df_network_groupX[, var],
+        y = df_network_groupX[, i],
+        z = df_network_groupX[, c('age')],
+        method = "spearman"
+      )
+      network_r <- c(network_r, pcor_stats$estimate)
+      network_p <- c(network_p, pcor_stats$p.value)
+    }
+    if (FDR_correction == TRUE) {
+      network_p = p.adjust(network_p, method = "none") #  adjustment
+    }
+    network_r <- c(str_c(groupname,'_',var, '_r') , network_r)
+    network_p <- c(str_c(groupname,'_',var, '_p')  , network_p)
+    stats_network_correlation <-
+      rbind(stats_network_mean, network_r, network_p, stringsAsFactors = FALSE)
+    return(stats_network_correlation)
+  }
+```
+
+
+Define common function
+table of node-level statistics for correlation
+```{r}
+Stats_partial_correlation_node <-
+  function(stats_node_mean, df_node_groupX, var, groupname) {
+    df_node_groupX[,'sex'] <- as.numeric(df_node_groupX[,'sex'])
+    node_r = list()
+    node_p = list()
+    for (i in node_names) {
+      pcor_stats = pcor.test(
+        x = df_node_groupX[, var],
+        y = df_node_groupX[, i],
+        z = df_node_groupX[, c('age')],
+        method = "spearman"
+      )
+      node_r <- c(node_r, pcor_stats$estimate)
+      node_p <- c(node_p, pcor_stats$p.value)
+    }
+    if (FDR_correction == TRUE) {
+      node_p = p.adjust(node_p, method = "none") # adjustment
+    }
+    node_r <- c(str_c(groupname,'_',var, '_r') , node_r)
+    node_p <- c(str_c(groupname,'_',var, '_p')  , node_p)
+    stats_node_correlation <-
+      rbind(stats_node_mean, node_r, node_p, stringsAsFactors = FALSE)
+    return(stats_node_correlation)
+  }
+```
+
+
+Summarize ICN-level `the decoupling index` for each group 
+```{r, warning=FALSE}
+stats_network_mean <- Stats_ICN_mean(df_network, ICN_type)
+stats_network_ancova <- Stats_table_p(df_network, network_names, stats_network_mean,
+              df_network_two,
+              df_network_dist,
+              df_network_prog)
+
+stats_network_ancova %>% kbl() %>% kable_minimal()
+network_sig_names <<- stats_network_ancova %>% filter(ANCOVA_two_sig <= 0.05 | ANCOVA_prog_sig <= 0.05) %>% rownames()
+
+```
+
+
+Summarize node-level `the decoupling index` for each group 
+```{r echo=TRUE, warning=FALSE}
+stats_parcel_mean <- Stats_parcel_mean(df_parcel)
+stats_parcel_ancova <-
+  Stats_table_p(
+    df_parcel,
+    parcel_names,
+    stats_parcel_mean,
+    df_parcel_two,
+    df_parcel_dist,
+    df_parcel_prog
+  )
+stats_parcel_ancova %<>% mutate_if(is.character, as.numeric)
+rownames(stats_parcel_ancova) <- colnames(stats_parcel_mean)[-1]
+if (ICN_type == 'Yeo') {
+  stats_parcel_ancova = merge(
+    stats_parcel_ancova,
+    LUT_path %>% dplyr::select(LABEL, Yeo_NETWORK),
+    by.x = "row.names",
+    by.y = "LABEL"
+  )
+  stats_Key_parcel_ancova = stats_parcel_ancova %>% filter(ANCOVA_two_sig <= 0.05 |
+                                                             ANCOVA_prog_sig <= 0.05) %>% filter(Yeo_NETWORK %in% network_sig_names)
+} else {
+  stats_parcel_ancova = merge(
+    stats_parcel_ancova,
+    LUT_path %>% dplyr::select(LABEL, Cole_NETWORK),
+    by.x = "row.names",
+    by.y = "LABEL"
+  )
+  stats_Key_parcel_ancova = stats_parcel_ancova %>% filter(ANCOVA_two_sig <= 0.05 | ANCOVA_prog_sig <= 0.05) %>% filter(Cole_NETWORK %in% network_sig_names)
+  
+}
+stats_Key_parcel_ancova %>% kbl() %>% kable_minimal()
+
+node_names <<- stats_Key_parcel_ancova$Row.names
+```
+
+
+
+Violin plot for `the decoupling index`
+```{r, warning=FALSE}
+
+plot_network <- Violin_plot(df_network, ICN_type, network_sig_names)
+p <- ggplot(plot_network, aes(x=ICN, y=value, fill=group)) + geom_violin(trim=FALSE) +  
+  geom_boxplot(width=0.2, position=position_dodge(0.9)) + stat_dens2d_filter(shape = 1, size = 3,aes(label =names), geom = "text_repel", keep.fraction = 0.02) + labs(y = "decoupling")
+p
+
+
+```
+
+
+
+Summarize `FA` for each group 
+```{r, warning=FALSE}
+stats_network_FA_mean <- Stats_ICN_mean(df_network_FA, ICN_type)
+stats_network_FA_ancova <- Stats_table_p(df_network_FA, network_names, stats_network_FA_mean,
+              df_network_FA_two,
+              df_network_FA_dist,
+              df_network_FA_prog)
+
+stats_network_FA_ancova %>% kbl() %>% kable_minimal()
+```
+
+
+Violin plot for `FA`
+```{r, warning=FALSE}
+
+plot_network_FA <- Violin_plot(df_network_FA, ICN_type,network_sig_names)
+p <- ggplot(plot_network_FA, aes(x=ICN, y=value, fill=group)) + geom_violin(trim=FALSE) +  
+  geom_boxplot(width=0.2, position=position_dodge(0.9)) + stat_dens2d_filter(shape = 1, size = 3,aes(label =names), geom = "text_repel", keep.fraction = 0.02) + labs(y = "FA")
+p
+
+```
+
+Summarize `the BOLD norm` for each group 
+```{r, warning=FALSE}
+if (activity_type == 'BOLD') {
+  stats_network_BN_mean <- Stats_ICN_mean(df_network_BN, ICN_type)
+  stats_network_BN_ancova <-
+    Stats_table_p(
+      df_network_BN,
+      network_names,
+      stats_network_BN_mean,
+      df_network_BN_two,
+      df_network_BN_dist,
+      df_network_BN_prog
+    )
+  
+  stats_network_BN_ancova %>% kbl() %>% kable_minimal()
+}
+```
+
+
+
+Violin plot for `the BOLD norm`
+```{r, warning=FALSE}
+if (activity_type == 'BOLD') {
+  plot_network_BN <- Violin_plot(df_network_BN, ICN_type,network_sig_names)
+  p <-
+    ggplot(plot_network_BN, aes(x = ICN, y = value, fill = group)) + geom_violin(trim =
+                                                                                            FALSE) +
+    geom_boxplot(width = 0.2, position = position_dodge(0.9)) + stat_dens2d_filter(
+      shape = 1,
+      size = 3,
+      aes(label = names),
+      geom = "text_repel",
+      keep.fraction = 0.02
+    ) + labs(y = "BN")
+  p
+
+}
+```
+
+
+***
+#### edss partial correlaion analysis
+Calculate significance for edss partial correlation on MS/CIS/progression cohort
+ICN-level
+```{r}
+
+stats_network_edss <- Stats_partial_correlation_ICN(stats_network_mean %>% dplyr::select(contains(c('group',network_sig_names))), df_network_MS, 'edss', 'MS')
+stats_network_edss <- Stats_partial_correlation_ICN(stats_network_edss, df_network_CIS, 'edss', 'CIS')
+stats_network_edss <- Stats_partial_correlation_ICN(stats_network_edss, df_network_prog_P, 'edss', 'prog')
+
+stats_network_edss = stats_network_edss %>% remove_rownames %>% column_to_rownames(var="group")
+stats_network_edss = t(stats_network_edss) 
+stats_network_edss = stats_network_edss %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_network_edss %>% kbl() %>% kable_minimal()
+    
+```
+
+
+node-level
+```{r}
+
+stats_node_edss <- Stats_partial_correlation_node(stats_parcel_mean %>% dplyr::select(contains(c('group',node_names))), df_parcel_MS, 'edss', 'MS')
+stats_node_edss <- Stats_partial_correlation_node(stats_node_edss, df_parcel_CIS, 'edss', 'CIS')
+stats_node_edss <- Stats_partial_correlation_node(stats_node_edss, df_parcel_prog_P, 'edss', 'prog')
+
+stats_node_edss = stats_node_edss %>% remove_rownames %>% column_to_rownames(var="group")
+stats_node_edss = t(stats_node_edss) 
+stats_node_edss = stats_node_edss %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_node_edss %>% kbl() %>% kable_minimal()
+    
+```
+
+
+***
+#### disease duration partial correlaion analysis
+
+Calculate significance for disease duration partial correlation on MS/CIS/progression cohort
+ICN-level
+```{r}
+stats_network_dd <- Stats_partial_correlation_ICN(stats_network_mean %>% dplyr::select(contains(c('group',network_sig_names))), df_network_MS, 'dd', 'MS')
+stats_network_dd <- Stats_partial_correlation_ICN(stats_network_dd, df_network_CIS, 'dd', 'CIS')
+stats_network_dd <- Stats_partial_correlation_ICN(stats_network_dd, df_network_prog_P, 'dd', 'prog')
+
+stats_network_dd = stats_network_dd %>% remove_rownames %>% column_to_rownames(var="group")
+stats_network_dd = t(stats_network_dd) 
+stats_network_dd = stats_network_dd %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_network_dd %>% kbl() %>% kable_minimal()
+```
+
+node-level
+```{r}
+
+stats_node_dd <- Stats_partial_correlation_node(stats_parcel_mean %>% dplyr::select(contains(c('group',node_names))), df_parcel_MS, 'dd', 'MS')
+stats_node_dd <- Stats_partial_correlation_node(stats_node_dd, df_parcel_CIS, 'dd', 'CIS')
+stats_node_dd <- Stats_partial_correlation_node(stats_node_dd, df_parcel_prog_P, 'dd', 'prog')
+
+stats_node_dd = stats_node_dd %>% remove_rownames %>% column_to_rownames(var="group")
+stats_node_dd = t(stats_node_dd) 
+stats_node_dd = stats_node_dd %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_node_dd %>% kbl() %>% kable_minimal()
+    
+```
+
+***
+#### pasat_2 partial correlaion analysis
+Calculate significance for pasat_2 partial correlation on MS/CIS/progression cohort
+ICN-level
+```{r}
+stats_network_pasat_2 <- Stats_partial_correlation_ICN(stats_network_mean %>% dplyr::select(contains(c('group',network_sig_names))), df_network_MS, 'pasat_2', 'MS')
+stats_network_pasat_2 <- Stats_partial_correlation_ICN(stats_network_pasat_2, df_network_CIS, 'pasat_2', 'CIS')
+stats_network_pasat_2 <- Stats_partial_correlation_ICN(stats_network_pasat_2, df_network_prog_P, 'pasat_2', 'prog')
+
+stats_network_pasat_2 = stats_network_pasat_2 %>% remove_rownames %>% column_to_rownames(var="group")
+stats_network_pasat_2 = t(stats_network_pasat_2) 
+stats_network_pasat_2 = stats_network_pasat_2 %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_network_pasat_2 %>% kbl() %>% kable_minimal()
+```
+
+node-level
+```{r}
+stats_node_pasat_2 <- Stats_partial_correlation_node(stats_parcel_mean %>% dplyr::select(contains(c('group',node_names))), df_parcel_MS, 'pasat_2', 'MS')
+stats_node_pasat_2 <- Stats_partial_correlation_node(stats_node_pasat_2, df_parcel_CIS, 'pasat_2', 'CIS')
+stats_node_pasat_2 <- Stats_partial_correlation_node(stats_node_pasat_2, df_parcel_prog_P, 'pasat_2', 'prog')
+
+stats_node_pasat_2 = stats_node_pasat_2 %>% remove_rownames %>% column_to_rownames(var="group")
+stats_node_pasat_2 = t(stats_node_pasat_2) 
+stats_node_pasat_2 = stats_node_pasat_2 %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_node_pasat_2 %>% kbl() %>% kable_minimal()
+    
+```
+
+***
+#### pasat_3 partial correlaion analysis
+
+Calculate significance for pasat_3 partial correlation on MS/CIS/progression cohort
+ICN-level
+```{r}
+stats_network_pasat_3 <- Stats_partial_correlation_ICN(stats_network_mean %>% dplyr::select(contains(c('group',network_sig_names))), df_network_MS, 'pasat_3', 'MS')
+stats_network_pasat_3 <- Stats_partial_correlation_ICN(stats_network_pasat_3, df_network_CIS, 'pasat_3', 'CIS')
+stats_network_pasat_3 <- Stats_partial_correlation_ICN(stats_network_pasat_3, df_network_prog_P, 'pasat_3', 'prog')
+
+stats_network_pasat_3 = stats_network_pasat_3 %>% remove_rownames %>% column_to_rownames(var="group")
+stats_network_pasat_3 = t(stats_network_pasat_3) 
+stats_network_pasat_3 = stats_network_pasat_3 %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_network_pasat_3 %>% kbl() %>% kable_minimal()
+```
+
+node-level
+```{r}
+
+stats_node_pasat_3 <- Stats_partial_correlation_node(stats_parcel_mean %>% dplyr::select(contains(c('group',node_names))), df_parcel_MS, 'pasat_3', 'MS')
+stats_node_pasat_3 <- Stats_partial_correlation_node(stats_node_pasat_3, df_parcel_CIS, 'pasat_3', 'CIS')
+stats_node_pasat_3 <- Stats_partial_correlation_node(stats_node_pasat_3, df_parcel_prog_P, 'pasat_3', 'prog')
+
+stats_node_pasat_3 = stats_node_pasat_3 %>% remove_rownames %>% column_to_rownames(var="group")
+stats_node_pasat_3 = t(stats_node_pasat_3) 
+stats_node_pasat_3 = stats_node_pasat_3 %>% as.data.frame() %>% dplyr::select(-CIS, -MS, -NC)
+stats_node_pasat_3 %>% kbl() %>% kable_minimal()
+    
+```
+
+
+
+Plot significant correlation
+```{r echo=TRUE}
+# config
+MS_col="#F8766D"
+NC_col="#00BA38"
+prog_col="#619CFF"
+
+ggplot(df_network_prog_P, aes(x = Somatomotor, y = pasat_3, color = group)) +
+  geom_point(size = 2) +
+  geom_smooth(color = 'black', method = lm, se = TRUE)+
+  # scale_color_manual(values = prog_col)  +
+  scale_fill_manual(values = prog_col)+ labs(x = "Decoupling Index", y = expression("pasat_3")) +
+  ggtitle("Somatomotor") + theme_light() +
+  theme(plot.title = element_text(hjust = 0.5),text = element_text(size=20),legend.position = "none")
+ggsave(file="Somatomotor_pasat_3.png", width=6, height=4, dpi=300)
+
+ggplot(df_parcel_prog_P, aes(x = Hippocampus_L, y = pasat_3, color = group)) +
+  geom_point( size = 2) +
+  geom_smooth(color = 'black', method = lm, se = TRUE)+
+  # scale_color_manual(values = 'black')  +
+  scale_fill_manual(values = prog_col)+ labs(x = "Decoupling Index", y = expression("pasat_3")) +
+  ggtitle("Hippocampus_L") + theme_light() +
+  theme(plot.title = element_text(hjust = 0.5),text = element_text(size=20),legend.position = "none")
+ggsave(file="Hippocampus_L_pasat_3.png", width=6, height=4, dpi=300)
+
+ggplot(df_parcel_prog_P, aes(x = Hippocampus_L, y = dd, color = group)) +
+  geom_point( size = 2) +
+  geom_smooth(color = 'black', method = lm, se = TRUE)+
+  # scale_color_manual(values = prog_col)  +
+  scale_fill_manual(values = prog_col)+ labs(x = "Decoupling Index", y = expression("dd")) +
+  ggtitle("Hippocampus_L") + theme_light() + 
+  theme(plot.title = element_text(hjust = 0.5),text = element_text(size=20),legend.position = "none")
+ggsave(file="Hippocampus_L_dd.png", width=6, height=4, dpi=300)
+```
+
+adding interaction term in GLM to measure how much SC or BN contribute to decoupling group difference
+```{r}
+df_network_two_merge1= merge(df_network_two, df_network_BN_two, by='names')
+df_network_two_merge2= merge(df_network_two_merge1, df_network_FA_two, by='names')
+summary(lm(Somatomotor.x ~ group +Somatomotor.y+Somatomotor+age+sex, data = df_network_two_merge2))
+summary(lm(Dorsal.Attention.x ~ group + Dorsal.Attention.y+Dorsal.Attention+age+sex, data = df_network_two_merge2))
+summary(lm(Subcortical.x ~ group + Subcortical.y+Subcortical+age+sex, data = df_network_two_merge2))
+
+
+df_parcel_two_merge1= merge(df_parcel_two, df_parcel_BN_two, by='names')
+df_parcel_two_merge2= merge(df_parcel_two_merge1, df_parcel_FA_two, by='names')
+summary(lm(Hippocampus_L.x ~ group + Hippocampus_L.y+Hippocampus_L+age+sex, data = df_parcel_two_merge2))
+```
+
+Plot Figure for each specific ICN (surrogate null model)
+```{r}
+# plot network based on network assignment
+# default: #F781BF; subcortical: #999999; Somatomotor:#377EB8; Dorsal.Attention: #4DAF4A
+# Ventral.Attention: #984EA3; Limbic: #FFFF33; Visual:#E41A1C; Frontoparietal:#A65628
+df_network_rand3 = df_network_rand2 %>% filter(netlabel %in% c('Frontoparietal'))
+df_network_empi3 = df_network_empi2 %>% filter(netlabel %in% c('Frontoparietal'))
+ggplot(df_network_rand3, aes(x=netlabel, y=value)) +
+  geom_boxplot(aes(fill=netlabel),outlier.shape = NA,fill='#A65628',width=0.2) + theme_light() +
+  theme(axis.text.x = element_text(size=20), axis.text.y = element_text(size = 20)) +
+#  ylim(1.25, 1.4) +
+  xlab('') + ylab('') +
+  geom_point(data = df_network_empi3, shape=16, size = 4,color='black') 
+ggsave(file="random_Frontoparietal.png", width=2, height=4, dpi=300)
+```
+
+Plot barplot of decoupling index for group comparison
+```{r}
+
+df_network_3group = df_network %>% filter(group %in% c('CIS','MS','NC'))
+plot_network <- Violin_plot(df_network_3group, ICN_type, network_names)
+p <- ggplot(plot_network, aes(x=ICN, y=value, fill=group)) + theme_light() +
+  theme(axis.text.y = element_text(size = 10),axis.text.x = element_text(size = 10,angle = 45, hjust = 1)) +
+  xlab('') + ylab('') +
+  # geom_violin(trim=FALSE) +  
+  geom_boxplot(width=0.2, position=position_dodge(0.9),outlier.shape = NA) + 
+  ylim(0.3, 2.5)
+
+p
+ggsave(file="decoupling_group_compare.png", width=6, height=4, dpi=300)
+```
+
+Plot barplot of decoupling index for Hippo_L
+```{r}
+
+df_parcel_3group = df_parcel %>% filter(group %in% c('CIS','MS','NC'))
+plot_network <- Violin_plot(df_parcel_3group, ICN_type, 'Hippocampus_L')
+p <- ggplot(plot_network, aes(x=ICN, y=value, fill=group)) + theme_light() +
+  theme(axis.text.y = element_text(size = 10),axis.text.x = element_text(size = 10,angle = 45, hjust = 1)) +
+  xlab('') + ylab('') +
+  # geom_violin(trim=FALSE) +  
+  geom_boxplot(width=0.2, position=position_dodge(0.9),outlier.shape = NA) + 
+  ylim(0.3, 5)
+
+p
+ggsave(file="decoupling_Hippo_L.png", width=6, height=4, dpi=300)
+```
