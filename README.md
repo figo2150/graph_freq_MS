@@ -1,5 +1,4 @@
-# graph_freq_MS
-graph frequency analysis of brain fingerprints for multiple sclerosis
+# graph frequency analysis for multiple sclerosis
 
 #### Brief intro
 This repository is associated with the paper "Coupling of brain activity and structural network in clinical isolated syndrome and multiple sclerosis: a graph frequency analysis study".
